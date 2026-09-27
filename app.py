@@ -11,11 +11,11 @@ st.set_page_config(page_title="AI Corporate Deals", page_icon="📊", layout="wi
 SOURCE_PAGE = "https://ourworldindata.org/grapher/corporate-investment-in-artificial-intelligence-by-type"
 CSV_URL = "https://ourworldindata.org/grapher/corporate-investment-in-artificial-intelligence-by-type.csv?v=1&csvType=full&useColumnShortNames=false"
 
-COLUMN_MAP = {
-    "Annual corporate investment in artificial intelligence by type - Private investment": "Private investment",
-    "Annual corporate investment in artificial intelligence by type - Merger/acquisition": "Merger/acquisition",
-    "Annual corporate investment in artificial intelligence by type - Public offering": "Public offering",
-    "Annual corporate investment in artificial intelligence by type - Minority stake": "Minority stake",
+ENTITY_MAP = {
+    "merger/acquisition": "Merger/acquisition",
+    "private investment": "Private investment",
+    "public offering": "Public offering",
+    "minority stake": "Minority stake",
 }
 
 COLORS = {
@@ -24,6 +24,7 @@ COLORS = {
     "Public offering": "#E45756",
     "Minority stake": "#72B7B2",
 }
+
 
 @st.cache_data(ttl=3600)
 def load_data() -> pd.DataFrame:
@@ -34,18 +35,25 @@ def load_data() -> pd.DataFrame:
     )
     response.raise_for_status()
     df = pd.read_csv(StringIO(response.text))
-    required = {"Year", *COLUMN_MAP.keys()}
-    missing = sorted(required.difference(df.columns))
-    if missing:
-        raise ValueError("The source schema changed. Missing columns: " + ", ".join(missing))
 
-    clean = df[["Year", *COLUMN_MAP.keys()]].copy().rename(columns=COLUMN_MAP)
+    required = {"Entity", "Year"}
+    missing = required.difference(df.columns)
+    if missing:
+        raise ValueError("Missing required columns: " + ", ".join(sorted(missing)))
+
+    value_cols = [column for column in df.columns if column not in {"Entity", "Code", "Year"}]
+    if len(value_cols) != 1:
+        raise ValueError(f"Expected one value column, found: {value_cols}")
+
+    value_col = value_cols[0]
+    clean = df[["Entity", "Year", value_col]].copy()
+    clean["Deal type"] = clean["Entity"].astype(str).str.strip().str.lower().map(ENTITY_MAP)
     clean["Year"] = pd.to_numeric(clean["Year"], errors="coerce")
-    deal_types = list(COLUMN_MAP.values())
-    clean[deal_types] = clean[deal_types].apply(pd.to_numeric, errors="coerce")
-    clean = clean.dropna(subset=["Year"]).sort_values("Year")
+    clean["Investment"] = pd.to_numeric(clean[value_col], errors="coerce")
+    clean = clean.dropna(subset=["Deal type", "Year", "Investment"])
     clean["Year"] = clean["Year"].astype(int)
-    return clean
+    return clean[["Year", "Deal type", "Investment"]].sort_values(["Year", "Deal type"])
+
 
 st.title("Global external corporate deals involving AI companies, by type")
 st.caption(
@@ -59,54 +67,62 @@ except Exception as exc:
     st.error(f"Unable to load the published dataset: {exc}")
     st.stop()
 
-all_types = list(COLUMN_MAP.values())
-min_year, max_year = int(data["Year"].min()), int(data["Year"].max())
+if data.empty:
+    st.error("The dataset loaded, but none of the expected deal categories were found.")
+    st.stop()
+
+all_types = list(ENTITY_MAP.values())
+min_year = int(data["Year"].min())
+max_year = int(data["Year"].max())
 
 with st.sidebar:
     st.header("Explore the chart")
-    selected_years = st.slider("Year range", min_year, max_year, (min_year, max_year))
-    selected_types = st.multiselect("Deal types", all_types, default=all_types)
+    selected_years = st.slider(
+        "Year range",
+        min_value=min_year,
+        max_value=max_year,
+        value=(min_year, max_year),
+    )
+    selected_types = st.multiselect(
+        "Deal types",
+        options=all_types,
+        default=all_types,
+    )
 
-if not selected_types:
-    st.info("Select at least one deal type to display the chart.")
-    st.stop()
+filtered = data[
+    data["Year"].between(selected_years[0], selected_years[1])
+    & data["Deal type"].isin(selected_types)
+].copy()
+filtered["Investment (billions)"] = filtered["Investment"] / 1_000_000_000
 
-filtered = data[data["Year"].between(*selected_years)]
-long_data = filtered.melt(
-    id_vars="Year",
-    value_vars=selected_types,
-    var_name="Deal type",
-    value_name="Investment",
-)
-long_data["Investment (billions)"] = long_data["Investment"] / 1_000_000_000
+if filtered.empty:
+    st.warning("Choose at least one deal type to display the chart.")
+else:
+    fig = px.bar(
+        filtered,
+        x="Year",
+        y="Investment (billions)",
+        color="Deal type",
+        color_discrete_map=COLORS,
+        category_orders={"Deal type": all_types},
+        labels={"Investment (billions)": "Investment (constant 2021 US$ billions)"},
+    )
+    fig.update_layout(
+        barmode="stack",
+        height=610,
+        legend_title_text="",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+        margin=dict(l=20, r=20, t=70, b=20),
+        plot_bgcolor="white",
+        hovermode="x unified",
+    )
+    fig.update_xaxes(dtick=1, showgrid=False)
+    fig.update_yaxes(showgrid=True, gridcolor="#E6E6E6", rangemode="tozero")
+    st.plotly_chart(fig, use_container_width=True)
 
-fig = px.bar(
-    long_data,
-    x="Year",
-    y="Investment (billions)",
-    color="Deal type",
-    color_discrete_map=COLORS,
-    category_orders={"Deal type": all_types},
+st.markdown(
+    "**Source:** Quid via AI Index Report (2026) and U.S. Bureau of Labor Statistics (2026), "
+    "processed by Our World in Data. "
+    f"[View the original chart and methodology]({SOURCE_PAGE})."
 )
-fig.update_layout(
-    barmode="stack",
-    xaxis_title=None,
-    yaxis_title="Constant 2021 US$ (billions)",
-    legend_title=None,
-    legend_orientation="h",
-    legend_yanchor="bottom",
-    legend_y=1.02,
-    legend_x=0,
-    hovermode="x unified",
-    margin=dict(l=20, r=20, t=70, b=20),
-)
-fig.update_xaxes(dtick=1)
-fig.update_yaxes(tickprefix="$", ticksuffix="B", gridcolor="rgba(0,0,0,0.12)")
-fig.update_traces(hovertemplate="$%{y:,.1f}B<extra></extra>")
-
-st.plotly_chart(fig, use_container_width=True)
-st.markdown(f"**Source:** [Our World in Data]({SOURCE_PAGE}), based on Quid via the AI Index Report and U.S. Bureau of Labor Statistics data.")
-st.caption(
-    "Recreated for educational purposes. The interactive controls filter years and deal types. "
-    "Values and category definitions follow the published source; styling is an approximation."
-)
+st.caption("Interactive recreation created for RCEL 506. Use the sidebar to change years and categories.")
