@@ -1,5 +1,9 @@
+
+from io import StringIO
+
 import pandas as pd
 import plotly.express as px
+import requests
 import streamlit as st
 
 st.set_page_config(page_title="AI Corporate Deals", page_icon="📊", layout="wide")
@@ -23,14 +27,19 @@ COLORS = {
 
 @st.cache_data(ttl=3600)
 def load_data() -> pd.DataFrame:
-    df = pd.read_csv(CSV_URL)
+    response = requests.get(
+        CSV_URL,
+        headers={"User-Agent": "Mozilla/5.0 (compatible; Streamlit data visualization project)"},
+        timeout=30,
+    )
+    response.raise_for_status()
+    df = pd.read_csv(StringIO(response.text))
     required = {"Year", *COLUMN_MAP.keys()}
     missing = sorted(required.difference(df.columns))
     if missing:
         raise ValueError("The source schema changed. Missing columns: " + ", ".join(missing))
 
-    clean = df[["Year", *COLUMN_MAP.keys()]].copy()
-    clean = clean.rename(columns=COLUMN_MAP)
+    clean = df[["Year", *COLUMN_MAP.keys()]].copy().rename(columns=COLUMN_MAP)
     clean["Year"] = pd.to_numeric(clean["Year"], errors="coerce")
     deal_types = list(COLUMN_MAP.values())
     clean[deal_types] = clean[deal_types].apply(pd.to_numeric, errors="coerce")
@@ -55,65 +64,49 @@ min_year, max_year = int(data["Year"].min()), int(data["Year"].max())
 
 with st.sidebar:
     st.header("Explore the chart")
-    selected_years = st.slider(
-        "Year range", min_year, max_year, (min_year, max_year)
-    )
-    selected_types = st.multiselect(
-        "Deal types", all_types, default=all_types
-    )
+    selected_years = st.slider("Year range", min_year, max_year, (min_year, max_year))
+    selected_types = st.multiselect("Deal types", all_types, default=all_types)
 
 if not selected_types:
-    st.warning("Select at least one deal type to display the chart.")
+    st.info("Select at least one deal type to display the chart.")
     st.stop()
 
-filtered = data[data["Year"].between(*selected_years)].copy()
-long_df = filtered.melt(
+filtered = data[data["Year"].between(*selected_years)]
+long_data = filtered.melt(
     id_vars="Year",
     value_vars=selected_types,
     var_name="Deal type",
-    value_name="Investment (US$)",
+    value_name="Investment",
 )
-long_df["Investment (US$ billions)"] = long_df["Investment (US$)"] / 1_000_000_000
+long_data["Investment (billions)"] = long_data["Investment"] / 1_000_000_000
 
 fig = px.bar(
-    long_df,
+    long_data,
     x="Year",
-    y="Investment (US$ billions)",
+    y="Investment (billions)",
     color="Deal type",
-    barmode="stack",
     color_discrete_map=COLORS,
     category_orders={"Deal type": all_types},
 )
-fig.update_traces(
-    hovertemplate="Year %{x}<br>%{fullData.name}: $%{y:.2f}B<extra></extra>"
-)
 fig.update_layout(
-    height=620,
-    paper_bgcolor="white",
-    plot_bgcolor="white",
-    legend_title_text="",
-    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-    margin=dict(l=20, r=20, t=55, b=20),
+    barmode="stack",
+    xaxis_title=None,
+    yaxis_title="Constant 2021 US$ (billions)",
+    legend_title=None,
+    legend_orientation="h",
+    legend_yanchor="bottom",
+    legend_y=1.02,
+    legend_x=0,
     hovermode="x unified",
+    margin=dict(l=20, r=20, t=70, b=20),
 )
-fig.update_xaxes(dtick=1, title_text="", showgrid=False)
-fig.update_yaxes(
-    title_text="",
-    tickprefix="$",
-    ticksuffix="B",
-    gridcolor="#E5E7EB",
-    zeroline=False,
-)
+fig.update_xaxes(dtick=1)
+fig.update_yaxes(tickprefix="$", ticksuffix="B", gridcolor="rgba(0,0,0,0.12)")
+fig.update_traces(hovertemplate="$%{y:,.1f}B<extra></extra>")
 
 st.plotly_chart(fig, use_container_width=True)
-
-st.markdown(
-    f"**Source:** [Our World in Data]({SOURCE_PAGE}), adapted from Quid via the AI Index Report and the U.S. Bureau of Labor Statistics."
+st.markdown(f"**Source:** [Our World in Data]({SOURCE_PAGE}), based on Quid via the AI Index Report and U.S. Bureau of Labor Statistics data.")
+st.caption(
+    "Recreated for educational purposes. The interactive controls filter years and deal types. "
+    "Values and category definitions follow the published source; styling is an approximation."
 )
-with st.expander("Methodology and limitations"):
-    st.write(
-        "The app reads the published OWID CSV directly and validates the named columns before plotting. "
-        "Raw dollar values are divided by one billion only for display. The source covers external "
-        "transactions involving privately held AI companies; it excludes public companies and internal "
-        "corporate spending such as R&D and infrastructure."
-    )
